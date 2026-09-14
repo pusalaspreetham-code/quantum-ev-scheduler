@@ -1,9 +1,15 @@
 import itertools
+import json
 
 from qiskit import QuantumCircuit
 from qiskit_aer import AerSimulator
 
 from qubo import build_qubo
+
+
+def load_data():
+    with open("data/small_problem.json", "r") as f:
+        return json.load(f)
 
 
 def calculate_qubo_score(Q, variables, bitstring):
@@ -40,17 +46,11 @@ def create_qaoa_circuit(
         num_qubits
     )
 
-    # ---------------------------------------------
-    # 1. Initial superposition
-    # ---------------------------------------------
-
+    # Initial superposition
     for q in range(num_qubits):
         qc.h(q)
 
-    # ---------------------------------------------
-    # 2. Cost layer
-    # ---------------------------------------------
-
+    # Cost layer
     for (var1, var2), coefficient in Q.items():
 
         q1 = variables.index(var1)
@@ -71,10 +71,7 @@ def create_qaoa_circuit(
                 q2
             )
 
-    # ---------------------------------------------
-    # 3. Mixer layer
-    # ---------------------------------------------
-
+    # Mixer layer
     for q in range(num_qubits):
 
         qc.rx(
@@ -82,10 +79,7 @@ def create_qaoa_circuit(
             q
         )
 
-    # ---------------------------------------------
-    # 4. Measurement
-    # ---------------------------------------------
-
+    # Measurement
     qc.measure(
         range(num_qubits),
         range(num_qubits)
@@ -94,7 +88,13 @@ def create_qaoa_circuit(
     return qc
 
 
-def run_qaoa(Q, variables, gamma, beta, shots=256):
+def run_qaoa(
+    Q,
+    variables,
+    gamma,
+    beta,
+    shots=1024
+):
 
     circuit = create_qaoa_circuit(
         Q,
@@ -135,15 +135,6 @@ def run_qaoa(Q, variables, gamma, beta, shots=256):
 
 def optimize_parameters(Q, variables):
 
-    print("\nOptimizing QAOA parameters")
-    print("--------------------------------")
-
-    best_score = float("inf")
-    best_gamma = None
-    best_beta = None
-    best_bitstring = None
-
-    # Try several gamma values
     gamma_values = [
         0.01,
         0.05,
@@ -155,7 +146,6 @@ def optimize_parameters(Q, variables):
         1.00
     ]
 
-    # Try several beta values
     beta_values = [
         0.05,
         0.10,
@@ -166,15 +156,10 @@ def optimize_parameters(Q, variables):
         1.00
     ]
 
-    total_tests = (
-        len(gamma_values)
-        * len(beta_values)
-    )
-
-    print(
-        f"Testing {total_tests} "
-        f"parameter combinations..."
-    )
+    best_score = float("inf")
+    best_gamma = None
+    best_beta = None
+    best_bitstring = None
 
     for gamma, beta in itertools.product(
         gamma_values,
@@ -196,29 +181,6 @@ def optimize_parameters(Q, variables):
             best_beta = beta
             best_bitstring = bitstring
 
-    print("\nBest parameters:")
-    print("--------------------------------")
-
-    print(
-        "Gamma:",
-        best_gamma
-    )
-
-    print(
-        "Beta:",
-        best_beta
-    )
-
-    print(
-        "Best QUBO score:",
-        best_score
-    )
-
-    print(
-        "Best bitstring:",
-        best_bitstring
-    )
-
     return (
         best_gamma,
         best_beta,
@@ -227,10 +189,90 @@ def optimize_parameters(Q, variables):
     )
 
 
+def decode_bitstring(
+    data,
+    variables,
+    bitstring
+):
+
+    evs = data["evs"]
+    chargers = data["chargers"]
+    time_slots = data["time_slots"]
+
+    schedule = []
+
+    for i, bit in enumerate(bitstring):
+
+        if bit != "1":
+            continue
+
+        variable = variables[i]
+
+        parts = variable.split("_")
+
+        e = int(parts[1])
+        c = int(parts[2])
+        t = int(parts[3])
+        energy = int(parts[4])
+
+        # x(...,0) means no charging
+        if energy == 0:
+            continue
+
+        price = time_slots[t]["price_per_kwh"]
+
+        cost = energy * price
+
+        schedule.append({
+            "ev": evs[e]["id"],
+            "charger": chargers[c]["id"],
+            "time": time_slots[t]["time"],
+            "energy": energy,
+            "price_per_kwh": price,
+            "cost": cost
+        })
+
+    return schedule
+
+
+def print_schedule(schedule):
+
+    print("\nQAOA Charging Schedule")
+    print("--------------------------------")
+
+    total_energy = 0
+    total_cost = 0
+
+    for item in schedule:
+
+        print(
+            f"{item['ev']} -> "
+            f"{item['charger']} -> "
+            f"{item['time']} -> "
+            f"{item['energy']} kWh -> "
+            f"₹{item['cost']}"
+        )
+
+        total_energy += item["energy"]
+        total_cost += item["cost"]
+
+    print("--------------------------------")
+
+    print(
+        f"Total Energy: {total_energy} kWh"
+    )
+
+    print(
+        f"Total Electricity Cost: ₹{total_cost}"
+    )
+
+
 def main():
 
-    print("\nQAOA Parameter Optimization")
+    print("\nQAOA EV Charging Optimization")
     print("--------------------------------")
+
+    data = load_data()
 
     Q, variables = build_qubo()
 
@@ -238,6 +280,7 @@ def main():
         f"\nQubits: {len(variables)}"
     )
 
+    # Optimize QAOA parameters
     (
         gamma,
         beta,
@@ -248,9 +291,26 @@ def main():
         variables
     )
 
-    print("\nFinal QAOA run")
+    print("\nBest QAOA Parameters")
     print("--------------------------------")
 
+    print(
+        f"Gamma: {gamma}"
+    )
+
+    print(
+        f"Beta: {beta}"
+    )
+
+    print(
+        f"QUBO Score: {score}"
+    )
+
+    print(
+        f"Bitstring: {bitstring}"
+    )
+
+    # Final QAOA run
     final_score, final_bitstring = run_qaoa(
         Q,
         variables,
@@ -259,25 +319,25 @@ def main():
         shots=1024
     )
 
+    print("\nFinal QAOA Result")
+    print("--------------------------------")
+
     print(
-        "Gamma:",
-        gamma
+        f"Bitstring: {final_bitstring}"
     )
 
     print(
-        "Beta:",
-        beta
+        f"QUBO Score: {final_score}"
     )
 
-    print(
-        "Bitstring:",
+    # Decode bitstring
+    schedule = decode_bitstring(
+        data,
+        variables,
         final_bitstring
     )
 
-    print(
-        "QUBO score:",
-        final_score
-    )
+    print_schedule(schedule)
 
     print("\nQAOA optimization completed.")
 
