@@ -1,272 +1,104 @@
 import json
-from collections import defaultdict
+
+with open("data/problem.json", "r") as file:
+    problem = json.load(file)
+
+P = 100
+Q = {}
+variables = {}
 
 
-def load_data():
-    with open("data/small_problem.json", "r") as f:
-        return json.load(f)
+def add_term(var1, var2, coefficient):
+    key = tuple(sorted((var1, var2)))
+    Q[key] = Q.get(key, 0) + coefficient
 
 
-def add_term(Q, var1, var2, value):
-    if var1 > var2:
-        var1, var2 = var2, var1
-
-    Q[(var1, var2)] += value
-
-
-def add_squared_constraint(Q, expression, target, penalty):
-
-    variables = list(expression.items())
-
-    for var, coefficient in variables:
-
-        linear_value = (
-            coefficient * coefficient
-            - 2 * target * coefficient
-        )
-
+def add_squared_constraint(terms, target):
+    for var, coefficient in terms:
         add_term(
-            Q,
             var,
             var,
-            penalty * linear_value
+            P * (coefficient ** 2 - 2 * target * coefficient)
         )
 
-    for i in range(len(variables)):
+    for i in range(len(terms)):
+        var1, coeff1 = terms[i]
 
-        var1, coefficient1 = variables[i]
-
-        for j in range(i + 1, len(variables)):
-
-            var2, coefficient2 = variables[j]
-
-            quadratic_value = (
-                2 * coefficient1 * coefficient2
-            )
+        for j in range(i + 1, len(terms)):
+            var2, coeff2 = terms[j]
 
             add_term(
-                Q,
                 var1,
                 var2,
-                penalty * quadratic_value
+                2 * P * coeff1 * coeff2
             )
 
 
-def build_qubo():
+# Create possible charging decisions
+for ev in problem["evs"]:
+    for charger in problem["chargers"]:
+        for slot in problem["time_slots"]:
 
-    data = load_data()
+            if ev["arrival"] <= slot["id"] <= ev["deadline"]:
 
-    time_slots = data["time_slots"]
-    chargers = data["chargers"]
-    evs = data["evs"]
+                for energy in range(charger["power_kw"] + 1):
 
-    Q = defaultdict(float)
-
-    CONSTRAINT_PENALTY = 100
-
-    variables = []
-
-    for e, ev in enumerate(evs):
-
-        for c, charger in enumerate(chargers):
-
-            for t, slot in enumerate(time_slots):
-
-                for r in range(
-                    charger["power_kw"] + 1
-                ):
-
-                    variable = (
-                        f"x_{e}_{c}_{t}_{r}"
+                    name = (
+                        f"{ev['id']}_"
+                        f"{charger['id']}_"
+                        f"T{slot['id']}_"
+                        f"E{energy}"
                     )
 
-                    variables.append(variable)
-
-    # Exactly one energy level
-    for e in range(len(evs)):
-
-        for c in range(len(chargers)):
-
-            for t in range(len(time_slots)):
-
-                expression = {}
-
-                for r in range(
-                    chargers[c]["power_kw"] + 1
-                ):
-
-                    variable = (
-                        f"x_{e}_{c}_{t}_{r}"
-                    )
-
-                    expression[variable] = 1
-
-                add_squared_constraint(
-                    Q,
-                    expression,
-                    target=1,
-                    penalty=CONSTRAINT_PENALTY
-                )
-
-    # Charger conflict
-    for c in range(len(chargers)):
-
-        for t in range(len(time_slots)):
-
-            for e1 in range(len(evs)):
-
-                for e2 in range(e1 + 1, len(evs)):
-
-                    for r1 in range(
-                        1,
-                        chargers[c]["power_kw"] + 1
-                    ):
-
-                        for r2 in range(
-                            1,
-                            chargers[c]["power_kw"] + 1
-                        ):
-
-                            var1 = (
-                                f"x_{e1}_{c}_{t}_{r1}"
-                            )
-
-                            var2 = (
-                                f"x_{e2}_{c}_{t}_{r2}"
-                            )
-
-                            add_term(
-                                Q,
-                                var1,
-                                var2,
-                                CONSTRAINT_PENALTY
-                            )
-
-    # EV conflict
-    for e in range(len(evs)):
-
-        for t in range(len(time_slots)):
-
-            for c1 in range(len(chargers)):
-
-                for c2 in range(c1 + 1, len(chargers)):
-
-                    for r1 in range(
-                        1,
-                        chargers[c1]["power_kw"] + 1
-                    ):
-
-                        for r2 in range(
-                            1,
-                            chargers[c2]["power_kw"] + 1
-                        ):
-
-                            var1 = (
-                                f"x_{e}_{c1}_{t}_{r1}"
-                            )
-
-                            var2 = (
-                                f"x_{e}_{c2}_{t}_{r2}"
-                            )
-
-                            add_term(
-                                Q,
-                                var1,
-                                var2,
-                                CONSTRAINT_PENALTY
-                            )
-
-    # Arrival and deadline
-    for e, ev in enumerate(evs):
-
-        for c, charger in enumerate(chargers):
-
-            for t, slot in enumerate(time_slots):
-
-                if (
-                    slot["id"] < ev["arrival"]
-                    or slot["id"] > ev["deadline"]
-                ):
-
-                    for r in range(
-                        1,
-                        charger["power_kw"] + 1
-                    ):
-
-                        variable = (
-                            f"x_{e}_{c}_{t}_{r}"
-                        )
-
-                        add_term(
-                            Q,
-                            variable,
-                            variable,
-                            CONSTRAINT_PENALTY
-                        )
-
-    # Exact energy requirement
-    for e, ev in enumerate(evs):
-
-        expression = {}
-
-        for c, charger in enumerate(chargers):
-
-            for t in range(len(time_slots)):
-
-                for r in range(
-                    charger["power_kw"] + 1
-                ):
-
-                    variable = (
-                        f"x_{e}_{c}_{t}_{r}"
-                    )
-
-                    expression[variable] = r
-
-        add_squared_constraint(
-            Q,
-            expression,
-            target=ev["energy_required_kwh"],
-            penalty=CONSTRAINT_PENALTY
-        )
-
-    # Electricity cost
-    for e in range(len(evs)):
-
-        for c, charger in enumerate(chargers):
-
-            for t, slot in enumerate(time_slots):
-
-                price = slot["price_per_kwh"]
-
-                for r in range(
-                    1,
-                    charger["power_kw"] + 1
-                ):
-
-                    variable = (
-                        f"x_{e}_{c}_{t}_{r}"
-                    )
-
-                    cost = r * price
-
-                    add_term(
-                        Q,
-                        variable,
-                        variable,
-                        cost
-                    )
-
-    print("\nSmall QUBO")
-    print("--------------------------------")
-    print(f"Binary variables: {len(variables)}")
-    print(f"QUBO terms: {len(Q)}")
-
-    return Q, variables
+                    variables[name] = {
+                        "ev": ev["id"],
+                        "charger": charger["id"],
+                        "time": slot["id"],
+                        "energy": energy,
+                        "price": slot["price_per_kwh"]
+                    }
 
 
-if __name__ == "__main__":
+# Add electricity cost
+for name, info in variables.items():
+    cost = info["energy"] * info["price"]
+    add_term(name, name, cost)
 
-    Q, variables = build_qubo()
 
-    print("\nQUBO successfully created.")
+# Choose exactly one energy option for each time slot
+groups = {}
+
+for name, info in variables.items():
+    key = (
+        info["ev"],
+        info["charger"],
+        info["time"]
+    )
+
+    groups.setdefault(key, []).append(name)
+
+
+for group in groups.values():
+    terms = [(var, 1) for var in group]
+    add_squared_constraint(terms, 1)
+
+
+# Deliver the required energy
+for ev in problem["evs"]:
+    terms = []
+
+    for name, info in variables.items():
+        if info["ev"] == ev["id"]:
+            terms.append((name, info["energy"]))
+
+    add_squared_constraint(
+        terms,
+        ev["energy_required_kwh"]
+    )
+
+
+print("Small EV Charging QUBO")
+print("--------------------------------")
+print("Binary variables:", len(variables))
+print("QUBO terms:", len(Q))
+print("\nQUBO successfully created.")

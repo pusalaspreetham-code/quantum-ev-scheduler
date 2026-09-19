@@ -1,346 +1,386 @@
-import itertools
 import json
 
-from qiskit import QuantumCircuit
+from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
 
-from qubo import build_qubo
+from qubo import Q, variables
 
 
-def load_data():
-    with open("data/small_problem.json", "r") as f:
-        return json.load(f)
+# Load the problem
+with open("data/small_problem.json", "r") as file:
+    problem = json.load(file)
 
 
-def calculate_qubo_score(Q, variables, bitstring):
-
-    values = {
-        variables[i]: int(bitstring[i])
-        for i in range(len(variables))
-    }
+# Calculate QUBO score
+def calculate_score(bitstring):
+    values = dict(zip(variables.keys(), map(int, bitstring)))
 
     score = 0
 
     for (var1, var2), coefficient in Q.items():
-
-        score += (
-            coefficient
-            * values[var1]
-            * values[var2]
-        )
+        score += coefficient * values[var1] * values[var2]
 
     return score
 
 
-def create_qaoa_circuit(
-    Q,
-    variables,
-    gamma,
-    beta
-):
+# Check whether the problem is feasible
+def check_feasibility():
+
+    for ev in problem["evs"]:
+
+        max_energy = 0
+
+        for charger in problem["chargers"]:
+
+            for slot in problem["time_slots"]:
+
+                if ev["arrival"] <= slot["id"] <= ev["deadline"]:
+                    max_energy += charger["power_kw"]
+
+        required_energy = ev["energy_required_kwh"]
+
+        if max_energy < required_energy:
+
+            print("\nProblem is infeasible")
+            print("--------------------------------")
+            print(
+                f"{ev['id']} requires: "
+                f"{required_energy} kWh"
+            )
+            print(
+                f"Maximum possible energy: "
+                f"{max_energy} kWh"
+            )
+            print("No valid charging schedule exists.")
+
+            return False
+
+    return True
+
+
+# Check whether a bitstring is valid
+def is_valid(bitstring):
+
+    values = dict(
+        zip(
+            variables.keys(),
+            map(int, bitstring)
+        )
+    )
+
+    # Check exactly one option for each time slot
+    groups = {}
+
+    for name, info in variables.items():
+
+        key = (
+            info["ev"],
+            info["charger"],
+            info["time"]
+        )
+
+        groups.setdefault(key, []).append(name)
+
+    for group in groups.values():
+
+        selected = sum(
+            values[name]
+            for name in group
+        )
+
+        if selected != 1:
+            return False
+
+    # Check required energy for each EV
+    for ev in problem["evs"]:
+
+        total_energy = 0
+
+        for name, info in variables.items():
+
+            if info["ev"] == ev["id"]:
+
+                total_energy += (
+                    values[name] *
+                    info["energy"]
+                )
+
+        if total_energy != ev["energy_required_kwh"]:
+            return False
+
+    return True
+
+
+# Create variable-to-qubit mapping
+variable_index = {
+    variable: index
+    for index, variable in enumerate(
+        variables.keys()
+    )
+}
+
+
+# Build QAOA circuit
+def build_qaoa_circuit(gamma, beta):
 
     num_qubits = len(variables)
 
-    qc = QuantumCircuit(
+    circuit = QuantumCircuit(
         num_qubits,
         num_qubits
     )
 
-    # Initial superposition
-    for q in range(num_qubits):
-        qc.h(q)
+    # Create superposition
+    for qubit in range(num_qubits):
+        circuit.h(qubit)
 
-    # Cost layer
+    # Apply cost layer
     for (var1, var2), coefficient in Q.items():
 
-        q1 = variables.index(var1)
-        q2 = variables.index(var2)
+        q1 = variable_index[var1]
+        q2 = variable_index[var2]
 
         if q1 == q2:
 
-            qc.rz(
-                2 * gamma * coefficient,
+            circuit.rz(
+                -gamma * coefficient,
                 q1
             )
 
         else:
 
-            qc.rzz(
-                2 * gamma * coefficient,
+            circuit.rz(
+                -gamma * coefficient / 2,
+                q1
+            )
+
+            circuit.rz(
+                -gamma * coefficient / 2,
+                q2
+            )
+
+            circuit.rzz(
+                gamma * coefficient / 2,
                 q1,
                 q2
             )
 
-    # Mixer layer
-    for q in range(num_qubits):
+    # Apply mixer
+    for qubit in range(num_qubits):
 
-        qc.rx(
+        circuit.rx(
             2 * beta,
-            q
+            qubit
         )
 
-    # Measurement
-    qc.measure(
+    # Measure
+    circuit.measure(
         range(num_qubits),
         range(num_qubits)
     )
 
-    return qc
+    return circuit
 
 
-def run_qaoa(
-    Q,
-    variables,
-    gamma,
-    beta,
-    shots=1024
-):
+# Check whether the problem can be solved
+if not check_feasibility():
 
-    circuit = create_qaoa_circuit(
-        Q,
-        variables,
-        gamma,
-        beta
-    )
-
-    simulator = AerSimulator()
-
-    result = simulator.run(
-        circuit,
-        shots=shots
-    ).result()
-
-    counts = result.get_counts()
-
-    best_score = float("inf")
-    best_bitstring = None
-
-    for measured_bitstring in counts:
-
-        bitstring = measured_bitstring[::-1]
-
-        score = calculate_qubo_score(
-            Q,
-            variables,
-            bitstring
-        )
-
-        if score < best_score:
-
-            best_score = score
-            best_bitstring = bitstring
-
-    return best_score, best_bitstring
+    raise SystemExit
 
 
-def optimize_parameters(Q, variables):
+# Search for QAOA parameters
+best_cost = float("inf")
+best_bitstring = None
+best_gamma = None
+best_beta = None
+best_counts = None
 
-    gamma_values = [
-        0.01,
+simulator = AerSimulator()
+
+
+for gamma in [
+    0.05,
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.8,
+    1.0
+]:
+
+    for beta in [
         0.05,
-        0.10,
-        0.20,
-        0.30,
-        0.50,
-        0.70,
-        1.00
-    ]
+        0.1,
+        0.2,
+        0.3,
+        0.5,
+        0.8,
+        1.0
+    ]:
 
-    beta_values = [
-        0.05,
-        0.10,
-        0.20,
-        0.30,
-        0.50,
-        0.70,
-        1.00
-    ]
-
-    best_score = float("inf")
-    best_gamma = None
-    best_beta = None
-    best_bitstring = None
-
-    for gamma, beta in itertools.product(
-        gamma_values,
-        beta_values
-    ):
-
-        score, bitstring = run_qaoa(
-            Q,
-            variables,
+        circuit = build_qaoa_circuit(
             gamma,
-            beta,
-            shots=256
+            beta
         )
 
-        if score < best_score:
+        compiled = transpile(
+            circuit,
+            simulator
+        )
 
-            best_score = score
-            best_gamma = gamma
-            best_beta = beta
-            best_bitstring = bitstring
+        result = simulator.run(
+            compiled,
+            shots=1024
+        ).result()
 
-    return (
-        best_gamma,
-        best_beta,
-        best_score,
-        best_bitstring
-    )
+        counts = result.get_counts()
+
+        for measured_bitstring in counts:
+
+            bitstring = measured_bitstring[::-1]
+
+            # Ignore invalid solutions
+            if not is_valid(bitstring):
+                continue
+
+            values = dict(
+                zip(
+                    variables.keys(),
+                    map(int, bitstring)
+                )
+            )
+
+            total_cost = 0
+
+            for name, value in values.items():
+
+                if value == 1:
+
+                    info = variables[name]
+
+                    total_cost += (
+                        info["energy"] *
+                        info["price"]
+                    )
+
+            if total_cost < best_cost:
+
+                best_cost = total_cost
+                best_bitstring = bitstring
+                best_gamma = gamma
+                best_beta = beta
+                best_counts = counts
 
 
-def decode_bitstring(
-    data,
-    variables,
-    bitstring
+# Make sure QAOA found a valid solution
+if best_bitstring is None:
+
+    print("\nQAOA did not find a valid solution.")
+
+    raise SystemExit
+
+
+# Print valid measurement results
+print("\nValid Measurement Results")
+print("--------------------------------")
+
+total_shots = sum(
+    best_counts.values()
+)
+
+for measured_bitstring, count in sorted(
+    best_counts.items(),
+    key=lambda item: item[1],
+    reverse=True
 ):
 
-    evs = data["evs"]
-    chargers = data["chargers"]
-    time_slots = data["time_slots"]
+    bitstring = measured_bitstring[::-1]
 
-    schedule = []
+    if is_valid(bitstring):
 
-    for i, bit in enumerate(bitstring):
-
-        if bit != "1":
-            continue
-
-        variable = variables[i]
-
-        parts = variable.split("_")
-
-        e = int(parts[1])
-        c = int(parts[2])
-        t = int(parts[3])
-        energy = int(parts[4])
-
-        # x(...,0) means no charging
-        if energy == 0:
-            continue
-
-        price = time_slots[t]["price_per_kwh"]
-
-        cost = energy * price
-
-        schedule.append({
-            "ev": evs[e]["id"],
-            "charger": chargers[c]["id"],
-            "time": time_slots[t]["time"],
-            "energy": energy,
-            "price_per_kwh": price,
-            "cost": cost
-        })
-
-    return schedule
-
-
-def print_schedule(schedule):
-
-    print("\nQAOA Charging Schedule")
-    print("--------------------------------")
-
-    total_energy = 0
-    total_cost = 0
-
-    for item in schedule:
+        probability = (
+            count /
+            total_shots *
+            100
+        )
 
         print(
-            f"{item['ev']} -> "
-            f"{item['charger']} -> "
-            f"{item['time']} -> "
-            f"{item['energy']} kWh -> "
-            f"₹{item['cost']}"
+            f"{bitstring} -> "
+            f"{count} shots -> "
+            f"{probability:.2f}% -> "
+            f"VALID"
         )
 
-        total_energy += item["energy"]
-        total_cost += item["cost"]
 
-    print("--------------------------------")
+# Decode the best solution
+values = dict(
+    zip(
+        variables.keys(),
+        map(int, best_bitstring)
+    )
+)
+
+schedule = []
+
+
+for name, value in values.items():
+
+    if value == 1:
+
+        info = variables[name]
+
+        schedule.append({
+            "ev": info["ev"],
+            "charger": info["charger"],
+            "time": info["time"],
+            "energy": info["energy"],
+            "price": info["price"],
+            "cost": (
+                info["energy"] *
+                info["price"]
+            )
+        })
+
+
+# Print final result
+print("\nQAOA EV Charging Optimization")
+print("--------------------------------")
+print("Qubits:", len(variables))
+print("Best gamma:", best_gamma)
+print("Best beta:", best_beta)
+print("Best bitstring:", best_bitstring)
+print(
+    "Best QUBO score:",
+    calculate_score(best_bitstring)
+)
+
+print("\nCharging Schedule")
+
+total_energy = 0
+total_cost = 0
+
+
+for item in schedule:
 
     print(
-        f"Total Energy: {total_energy} kWh"
+        f"{item['ev']} -> "
+        f"{item['charger']} -> "
+        f"Time Slot {item['time']} -> "
+        f"{item['energy']} kWh -> "
+        f"₹{item['cost']}"
     )
 
-    print(
-        f"Total Electricity Cost: ₹{total_cost}"
-    )
+    total_energy += item["energy"]
+    total_cost += item["cost"]
 
 
-def main():
+print(
+    "\nTotal Energy:",
+    total_energy,
+    "kWh"
+)
 
-    print("\nQAOA EV Charging Optimization")
-    print("--------------------------------")
-
-    data = load_data()
-
-    Q, variables = build_qubo()
-
-    print(
-        f"\nQubits: {len(variables)}"
-    )
-
-    # Optimize QAOA parameters
-    (
-        gamma,
-        beta,
-        score,
-        bitstring
-    ) = optimize_parameters(
-        Q,
-        variables
-    )
-
-    print("\nBest QAOA Parameters")
-    print("--------------------------------")
-
-    print(
-        f"Gamma: {gamma}"
-    )
-
-    print(
-        f"Beta: {beta}"
-    )
-
-    print(
-        f"QUBO Score: {score}"
-    )
-
-    print(
-        f"Bitstring: {bitstring}"
-    )
-
-    # Final QAOA run
-    final_score, final_bitstring = run_qaoa(
-        Q,
-        variables,
-        gamma,
-        beta,
-        shots=1024
-    )
-
-    print("\nFinal QAOA Result")
-    print("--------------------------------")
-
-    print(
-        f"Bitstring: {final_bitstring}"
-    )
-
-    print(
-        f"QUBO Score: {final_score}"
-    )
-
-    # Decode bitstring
-    schedule = decode_bitstring(
-        data,
-        variables,
-        final_bitstring
-    )
-
-    print_schedule(schedule)
-
-    print("\nQAOA optimization completed.")
-
-
-if __name__ == "__main__":
-    main()
+print(
+    "Total Cost: ₹",
+    total_cost
+)
